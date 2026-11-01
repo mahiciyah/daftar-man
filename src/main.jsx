@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Capacitor } from '@capacitor/core';
+import { SmsInbox } from 'capacitor-sms-inbox';
+import { parseBankSms } from './sms-parser.js';
 
 /* ---------- helpers ---------- */
 const KEY = 'daftar-man-v1';
@@ -23,11 +26,13 @@ const INC_CATS = ['حقوق','فریلنس','هدیه','سایر'];
 const PALETTE = ['#fb7185','#f59e0b','#8b5cf6','#22d3ee','#34d399','#60a5fa','#f472b6','#a3a3c2'];
 
 const seed = () => ({
-  wallets:[{id:'w1',name:'نقد',initial:0},{id:'w2',name:'کارت بانکی',initial:0}],
+  wallets:[{id:'w1',name:'نقد',initial:0,smsCode:''},{id:'w2',name:'کارت بانکی',initial:0,smsCode:''}],
+  sms:{seen:[],pending:[],lastScan:0}, settings:{smsUnit:'rial'},
   txs:[], debts:[],
   lists:[{id:'l1',name:'خرید سوپرمارکت',items:['سیب','برنج','قند','آرد'].map(n=>({id:uid(),name:n,done:false}))}],
   notes:[], todos:[]
 });
+const msToStr = ms => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
 const walletBal = (db,w) => w.initial + db.txs.filter(t=>t.walletId===w.id).reduce((s,t)=>s+(t.type==='income'?t.amount:-t.amount),0);
 
 /* ---------- icons ---------- */
@@ -82,7 +87,7 @@ function QuickEntry({db,preset={},onClose,onSave}){
   const [amount,setAmount]=useState(preset.amount||0);
   const cats = type==='income'?INC_CATS:EXP_CATS;
   const [category,setCategory]=useState(preset.category||cats[0]);
-  const [walletId,setWalletId]=useState(db.wallets[0]?.id);
+  const [walletId,setWalletId]=useState(preset.walletId||db.wallets[0]?.id);
   const [note,setNote]=useState(preset.note||'');
   useEffect(()=>{ if(!cats.includes(category)) setCategory(cats[0]); },[type]);
   const c = type==='income'?'var(--emerald)':'var(--rose)';
@@ -93,7 +98,7 @@ function QuickEntry({db,preset={},onClose,onSave}){
     <div><label className="lbl">دسته‌بندی</label><Chips options={cats} value={category} onChange={setCategory} color={c}/></div>
     <WalletPick db={db} value={walletId} onChange={setWalletId}/>
     <div><label className="lbl">توضیح (اختیاری)</label><input className="field" value={note} onChange={e=>setNote(e.target.value)} placeholder="مثلاً ناهار با دوستان"/></div>
-    <button className={'neu btn block '+(type==='income'?'emerald':'rose')} disabled={!amount||!walletId} onClick={()=>onSave({type,amount,category,walletId,note})}>
+    <button className={'neu btn block '+(type==='income'?'emerald':'rose')} disabled={!amount||!walletId} onClick={()=>onSave({type,amount,category,walletId,note,...(preset.date?{date:preset.date}:{})})}>
       {type==='income'?'ثبت درآمد':'ثبت هزینه'}</button>
   </Sheet>;
 }
@@ -129,13 +134,36 @@ function DebtSheet({onClose,onSave}){
     <button className="neu btn primary block" disabled={!person.trim()||!amount} onClick={()=>onSave({person:person.trim(),amount,kind,due})}>ذخیره</button>
   </Sheet>;
 }
-function WalletSheet({onClose,onSave}){
-  const [name,setName]=useState(''); const [initial,setInitial]=useState(0);
-  return <Sheet title="کیف پول جدید" onClose={onClose}>
-    <div><label className="lbl">نام</label><input className="field" value={name} onChange={e=>setName(e.target.value)} placeholder="مثلاً پس‌انداز" autoFocus/></div>
+function WalletSheet({wallet,onClose,onSave}){
+  const [name,setName]=useState(wallet?.name||''); const [initial,setInitial]=useState(wallet?.initial||0); const [code,setCode]=useState(wallet?.smsCode||'');
+  return <Sheet title={wallet?'ویرایش کیف پول':'کیف پول جدید'} onClose={onClose}>
+    <div><label className="lbl">نام</label><input className="field" value={name} onChange={e=>setName(e.target.value)} placeholder="مثلاً کارت صادرات" autoFocus/></div>
     <div><label className="lbl">موجودی اولیه</label><MoneyInput value={initial} onChange={setInitial}/></div>
-    <button className="neu btn primary block" disabled={!name.trim()} onClick={()=>onSave(name.trim(),initial)}>افزودن</button>
+    <div><label className="lbl">کد حساب در پیامک (اختیاری)</label><input className="field num" inputMode="numeric" value={code} onChange={e=>setCode(toEn(e.target.value))} placeholder="مثلاً 94001"/>
+      <div className="sm muted" style={{margin:'6px 4px 0'}}>عددی که بعد از «حساب:» در پیامک بانک می‌آید؛ برای تشخیص خودکار کارت.</div></div>
+    <button className="neu btn primary block" disabled={!name.trim()} onClick={()=>onSave(name.trim(),initial,code)}>{wallet?'ذخیره':'افزودن'}</button>
   </Sheet>;
+}
+function SmsCard({db,A,msg}){
+  const p=db.sms.pending; const div=db.settings.smsUnit==='rial'?10:1;
+  return <div className="glass pad stack" style={{gap:12,borderColor:p.length?'rgba(34,211,238,.4)':undefined}}>
+    <div className="row between"><h2 className="sec" style={{margin:0}}>پیامک‌های بانکی{p.length?` (${p.length.toLocaleString('fa-IR')})`:''}</h2>
+      <button className="neu btn" style={{padding:'7px 13px',color:'var(--cyan)'}} onClick={()=>A.scan(true)}>بررسی پیامک</button></div>
+    <div className="row sm muted" style={{gap:8}}><span>واحد مبلغ در پیامک:</span>
+      <div className="seg" style={{minWidth:130}}>{[['rial','ریال'],['toman','تومان']].map(([k,l])=><button key={k} className={db.settings.smsUnit===k?'on':''} style={{padding:'5px'}} onClick={()=>A.setSmsUnit(k)}>{l}</button>)}</div></div>
+    {msg&&<div className="sm" style={{color:'var(--amber)'}}>{msg}</div>}
+    {!p.length&&!msg&&<div className="sm muted">پیامک جدیدی در انتظار نیست.</div>}
+    <div className="stack" style={{gap:10}}>{p.map(x=>{
+      const w=db.wallets.find(w=>w.smsCode&&(x.account===w.smsCode||x.account.endsWith(w.smsCode)));
+      const inc=x.type==='income', amt=Math.round(x.amount/div);
+      return <div className="item" key={x.id} style={{cursor:'pointer'}} onClick={()=>A.open({kind:'quick',preset:{type:x.type,amount:amt,category:x.category,walletId:w?.id,date:msToStr(x.date),title:'ثبت از پیامک'},convert:{src:'sms',id:x.id}})}>
+        <div className="tx-ic" style={{background:inc?'rgba(52,211,153,.14)':'rgba(251,113,133,.14)',color:inc?'var(--emerald)':'var(--rose)'}}><Icon n={inc?'down':'up'} size={18}/></div>
+        <div className="grow"><div style={{fontWeight:500}}>{x.label}</div>
+          <div className="sm muted">{w?w.name:`حساب ${x.account||'؟'}`} · {fmtDate(msToStr(x.date))} {x.time}</div></div>
+        <div style={{textAlign:'left'}}><div className="num" style={{fontWeight:700,color:inc?'var(--emerald)':'var(--rose)'}}>{inc?'+':'−'}{fmt(amt)}</div><div className="sm" style={{color:'var(--cyan)'}}>دسته‌بندی ←</div></div>
+        <button className="icon-btn" onClick={e=>{e.stopPropagation();A.dismissSms(x.id);}} aria-label="نادیده گرفتن"><Icon n="x" size={16}/></button>
+      </div>; })}</div>
+  </div>;
 }
 function TextSheet({title,label,placeholder,cta,onClose,onSave}){
   const [v,setV]=useState('');
@@ -190,7 +218,7 @@ function useCountUp(v){
   return x;
 }
 
-function Dashboard({db,A}){
+function Dashboard({db,A,smsMsg}){
   const nowK=jKey(new Date());
   const month=db.txs.filter(t=>jKey(toD(t.date))===nowK);
   const inc=month.filter(t=>t.type==='income').reduce((s,t)=>s+t.amount,0);
@@ -201,6 +229,7 @@ function Dashboard({db,A}){
   const balance=walletsTotal+lent-owed; // موجودی کیف‌پول‌ها (= درآمد − هزینه) + طلب − بدهی
   const shown=useCountUp(balance); const net=lent-owed;
   return <div className="stack tabview">
+    <SmsCard db={db} A={A} msg={smsMsg}/>
     <div className="glass hero" style={{boxShadow:'0 30px 60px -30px rgba(96,165,250,.45),inset 0 1px 0 rgba(255,255,255,.07)'}}>
       <div className="row"><i className="dot" style={{'--c':'var(--blue)'}}/><span className="muted">تراز کل (موجودی واقعی)</span></div>
       <div className="big num" style={{color:shown<0?'var(--rose)':'var(--text)'}}>{fmt(shown)}<span className="unit">تومان</span></div>
@@ -214,7 +243,7 @@ function Dashboard({db,A}){
     <div>
       <div className="row between" style={{marginBottom:2}}><h2 className="sec" style={{margin:0}}>کیف پول‌ها</h2></div>
       <div className="wallets">
-        {db.wallets.map(w=><div className="neu wallet" key={w.id}><div className="row sm muted"><Icon n="wallet" size={16}/>{w.name}</div><div className="num" style={{fontWeight:800,fontSize:'1.05rem'}}>{fmt(walletBal(db,w))}</div></div>)}
+        {db.wallets.map(w=><button className="neu wallet" key={w.id} style={{textAlign:'right'}} onClick={()=>A.open({kind:'wallet',wallet:w})}><div className="row sm muted"><Icon n="wallet" size={16}/>{w.name}</div><div className="num" style={{fontWeight:800,fontSize:'1.05rem'}}>{fmt(walletBal(db,w))}</div>{w.bankBalance&&<div className="sm muted num">مانده بانک: {fmt(w.bankBalance.value)}</div>}</button>)}
         <button className="neu wallet row" style={{justifyContent:'center',color:'var(--muted)',minWidth:64}} onClick={()=>A.open({kind:'wallet'})} aria-label="کیف پول جدید"><Icon n="plus"/></button>
       </div>
     </div>
@@ -349,11 +378,34 @@ function Notes({db,A}){
 
 /* ---------- app ---------- */
 function App(){
-  const [db,setDb]=useState(()=>store.get(KEY)||seed());
+  const [db,setDb]=useState(()=>({...seed(),...(store.get(KEY)||{})}));
+  const dbRef=useRef(db); dbRef.current=db;
+  const [smsMsg,setSmsMsg]=useState('');
   const [tab,setTab]=useState('dash'); const [sheet,setSheet]=useState(null); const [burst,setBurst]=useState(0);
   const listState=useState(db.lists[0]?.id);
   useEffect(()=>{ store.set(KEY,db); },[db]);
   const close=()=>setSheet(null);
+  const scanSms=async(manual)=>{
+    if(!Capacitor.isNativePlatform()){ if(manual) setSmsMsg('خواندن پیامک فقط در نسخه APK اندروید کار می‌کند.'); return; }
+    try{
+      let st=await SmsInbox.checkPermissions();
+      if(st.sms!=='granted') st=await SmsInbox.requestPermissions();
+      if(st.sms!=='granted'){ setSmsMsg('اجازه خواندن پیامک داده نشده؛ از تنظیمات اندروید برای برنامه فعالش کنید.'); return; }
+      const cur=dbRef.current.sms;
+      const since=cur.lastScan||Date.now()-7*864e5;
+      const res=await SmsInbox.getSMSList({filter:{minDate:since-120000,maxCount:300}});
+      const seen=new Set(cur.seen), newSeen=[...cur.seen], pending=[...cur.pending]; let added=0;
+      (res.smsList||[]).forEach(m=>{
+        const date=Number(m.date)||Date.now(); const id=String(m.id??`${date}-${(m.body||'').length}`);
+        if(seen.has(id)) return; const p=parseBankSms(m.body); if(!p) return;
+        seen.add(id); newSeen.push(id); pending.push({id,date,...p}); added++; });
+      pending.sort((a,b)=>b.date-a.date);
+      setDb(d=>({...d,sms:{seen:newSeen.slice(-1500),pending,lastScan:Date.now()}}));
+      setSmsMsg(manual&&!added?'پیامک بانکی جدیدی پیدا نشد.':'');
+    }catch(e){ setSmsMsg('خطا در خواندن پیامک: '+(e&&e.message?e.message:'نامشخص')); }
+  };
+  useEffect(()=>{ scanSms(false); const h=()=>{ if(document.visibilityState==='visible') scanSms(false); };
+    document.addEventListener('visibilitychange',h); return()=>document.removeEventListener('visibilitychange',h); },[]);
   const celebrate=()=>{ setBurst(b=>b+1); setTimeout(()=>setBurst(0),1000); };
   const mkTx=t=>({id:uid(),date:todayStr(),...t});
   const mapList=(d,lid,fn)=>({...d,lists:d.lists.map(l=>l.id!==lid?l:{...l,items:fn(l.items)})});
@@ -361,9 +413,15 @@ function App(){
   const A={
     open:setSheet,
     addTx:(t,conv)=>{ setDb(d=>{ let n={...d,txs:[mkTx(t),...d.txs]};
-        if(conv){ const k=conv.src==='note'?'notes':'todos'; n[k]=d[k].map(x=>x.id===conv.id?{...x,converted:true}:x); } return n; }); close(); celebrate(); },
+        if(conv&&conv.src==='sms'){ const p=d.sms.pending.find(x=>x.id===conv.id); n.sms={...d.sms,pending:d.sms.pending.filter(x=>x.id!==conv.id)};
+          if(p&&p.balance!=null){ const div=d.settings.smsUnit==='rial'?10:1; n.wallets=d.wallets.map(w=>w.id===t.walletId?{...w,bankBalance:{value:Math.round(p.balance/div),at:p.date}}:w); } }
+        else if(conv){ const k=conv.src==='note'?'notes':'todos'; n[k]=d[k].map(x=>x.id===conv.id?{...x,converted:true}:x); } return n; }); close(); celebrate(); },
+    scan:scanSms,
+    dismissSms:id=>setDb(d=>({...d,sms:{...d.sms,pending:d.sms.pending.filter(x=>x.id!==id)}})),
+    setSmsUnit:u=>setDb(d=>({...d,settings:{...d.settings,smsUnit:u}})),
+    editWallet:(id,name,initial,smsCode)=>{ setDb(d=>({...d,wallets:d.wallets.map(w=>w.id===id?{...w,name,initial,smsCode}:w)})); close(); },
     delTx:id=>setDb(d=>({...d,txs:d.txs.filter(t=>t.id!==id)})),
-    addWallet:(name,initial)=>{ setDb(d=>({...d,wallets:[...d.wallets,{id:uid(),name,initial}]})); close(); },
+    addWallet:(name,initial,smsCode)=>{ setDb(d=>({...d,wallets:[...d.wallets,{id:uid(),name,initial,smsCode:smsCode||''}]})); close(); },
     addList:name=>{ const id=uid(); setDb(d=>({...d,lists:[...d.lists,{id,name,items:[]}]})); listState[1](id); close(); },
     delList:id=>{ setDb(d=>({...d,lists:d.lists.filter(l=>l.id!==id)})); listState[1](null); },
     addItem:(lid,name)=>setDb(d=>mapList(d,lid,its=>[...its,{id:uid(),name,done:false}])),
@@ -388,7 +446,7 @@ function App(){
   return <div className="app">
     <header className="top"><div><h1>دفتر من</h1><small>{new Intl.DateTimeFormat('fa-IR-u-ca-persian',{weekday:'long',day:'numeric',month:'long',year:'numeric'}).format(new Date())}</small></div></header>
     <main key={tab}>
-      {tab==='dash'&&<Dashboard db={db} A={A}/>}
+      {tab==='dash'&&<Dashboard db={db} A={A} smsMsg={smsMsg}/>}
       {tab==='shop'&&<Shopping db={db} A={A} state={listState}/>}
       {tab==='debt'&&<Debts db={db} A={A}/>}
       {tab==='notes'&&<Notes db={db} A={A}/>}
@@ -400,7 +458,7 @@ function App(){
     {sheet?.kind==='buy'&&<BuySheet db={db} item={sheet.item} onClose={close} onSave={(a,w)=>A.buy(sheet.listId,sheet.item,a,w)}/>}
     {sheet?.kind==='settle'&&<SettleSheet db={db} debt={sheet.debt} onClose={close} onSave={(a,w)=>A.settle(sheet.debt,a,w)}/>}
     {sheet?.kind==='debt'&&<DebtSheet onClose={close} onSave={A.addDebt}/>}
-    {sheet?.kind==='wallet'&&<WalletSheet onClose={close} onSave={A.addWallet}/>}
+    {sheet?.kind==='wallet'&&<WalletSheet wallet={sheet.wallet} onClose={close} onSave={(n,i,c)=>sheet.wallet?A.editWallet(sheet.wallet.id,n,i,c):A.addWallet(n,i,c)}/>}
     {sheet?.kind==='list'&&<TextSheet title="لیست خرید جدید" label="نام لیست" placeholder="مثلاً میوه‌فروشی" cta="ساخت لیست" onClose={close} onSave={A.addList}/>}
     {burst>0&&<div className="burst" key={burst}><div className="ring"><Icon n="check" size={54} sw={3}/></div></div>}
   </div>;
