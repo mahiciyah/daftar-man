@@ -13,7 +13,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "vazirmatn": "^33.0.3",
-    "capacitor-sms-inbox": "latest"
+    "capacitor-sms-inbox": "1.1.1"
   },
   "devDependencies": {
     "@capacitor/cli": "^6.1.2",
