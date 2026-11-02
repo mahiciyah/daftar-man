@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Capacitor } from '@capacitor/core';
-import { SmsInbox } from 'capacitor-sms-inbox';
+import { Capacitor, registerPlugin } from '@capacitor/core';
+import * as SmsMod from 'capacitor-sms-inbox';
 import { parseBankSms } from './sms-parser.js';
+const SmsInbox = SmsMod.SMSInboxReader || SmsMod.SmsInbox || registerPlugin('SMSInboxReader');
 
 /* ---------- helpers ---------- */
 const KEY = 'daftar-man-v1';
