@@ -12,7 +12,8 @@
     "@capacitor/core": "^6.1.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "vazirmatn": "^33.0.3"
+    "vazirmatn": "^33.0.3",
+    "capacitor-sms-inbox": "latest"
   },
   "devDependencies": {
     "@capacitor/cli": "^6.1.2",
